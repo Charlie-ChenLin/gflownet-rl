@@ -1,4 +1,5 @@
 import argparse
+import wandb
 import numpy as np
 import math
 import os
@@ -15,6 +16,12 @@ from torch.distributions.categorical import Categorical
 from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 from torchrl.data.replay_buffers.samplers import PrioritizedSampler
 from tensordict import TensorDict
+import sys
+import io
+
+# 替换 stdout 为启用行缓冲的版本（自动 flush 每一行）
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
 parser = argparse.ArgumentParser()
 
@@ -40,6 +47,9 @@ parser.add_argument("--subtb_lambda", default=1.9, type=float)
 parser.add_argument("--leaf_coeff", default=5.0, type=float)
 parser.add_argument("--update_target_every", default=5, type=int)
 parser.add_argument("--corr_num_rounds", default=10, type=int)
+
+# biased GFlowNet
+parser.add_argument("--alpha",default=0.5, type=float)
 
 # SoftDQN params
 parser.add_argument("--start_learning", default=50, type=int)
@@ -197,7 +207,7 @@ def TB_train_step(model, log_Z, optimizer, Z_optimizer, M, args):
             batch = batch_cl
  
         p_forward_sum += sum_logits[range(args.batch_size), actions] - torch.logsumexp(sum_logits, dim=-1)
-        p_backward_sum += torch.log(torch.tensor(1 / (i + 1))).to(args.device)
+        p_backward_sum += torch.log(torch.tensor(1 / (i + 1))).to(args.device)-torch.log(torch.tensor(args.alpha/(1-args.alpha))).to(args.device)
 
     log_rewards = args.reward_exponent * batch_log_rewards(batch[:, 1:], M, args.k).to(args.device).detach()
     loss = (log_Z.sum() + p_forward_sum - p_backward_sum - log_rewards).pow(2).mean() 
@@ -228,7 +238,7 @@ def DB_train_step(model, optimizer, M, args):
         log_f = all_logits[0, :, 2**args.k]
 
         if pred_logits is not None:
-            loss += (pred_f + pred_logits - log_f - torch.log(torch.tensor(1 / i)).to(args.device)).pow(2).mean()
+            loss += (pred_f + pred_logits - log_f - torch.log(torch.tensor(1 / i)).to(args.device)+torch.log(torch.tensor(args.alpha/(1-args.alpha))).to(args.device)).pow(2).mean()
 
         with torch.no_grad():
             _, _, sum_uniform = process_logits(0.0 * all_logits.clone(), pos_mask, args)
@@ -243,7 +253,7 @@ def DB_train_step(model, optimizer, M, args):
         pred_f = log_f
 
     log_rewards = args.reward_exponent * batch_log_rewards(batch[:, 1:], M, args.k).to(args.device).detach()
-    loss += (pred_f + pred_logits - log_rewards - torch.log(torch.tensor(1 / (args.n // args.k))).to(args.device)).pow(2).mean()
+    loss += (pred_f + pred_logits - log_rewards - torch.log(torch.tensor(1 / (args.n // args.k))).to(args.device)+torch.log(torch.tensor(args.alpha/(1-args.alpha))).to(args.device)).pow(2).mean()
     loss = loss / (args.n // args.k)
     loss.backward()
     optimizer.step()
@@ -292,7 +302,7 @@ def SubTB_train_step(model, optimizer, M, args):
     for i in range(log_fs.shape[0]):
         for j in range(i + 1, log_fs.shape[0]):
             lmbd = args.subtb_lambda ** (j - i)
-            loss += lmbd * (log_fs[i, :] + log_pfs[i:j, :].sum(dim=0) - log_fs[j, :] - log_pbs[i+1:j+1, :].sum(dim=0)).pow(2).mean()
+            loss += lmbd * (log_fs[i, :] + log_pfs[i:j, :].sum(dim=0) - log_fs[j, :] - log_pbs[i+1:j+1, :].sum(dim=0)+(j-i-1)*torch.log(torch.tensor(args.alpha/(1-args.alpha))).to(args.device)).pow(2).mean()
             total_lambda += lmbd
     loss /= total_lambda
     
@@ -457,6 +467,8 @@ def compute_correlation(model, M, test_set, args, rounds=10, batch_size=180):
 
 
 def main(args):
+    wandb.init(project='Length Biased GFlowNets, GFN-RL-codebase, Bit Sequence Generation, New', name=f'method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed})')
+
     torch.manual_seed(args.seed)
     device = args.device
     assert args.n % args.k == 0
@@ -464,7 +476,8 @@ def main(args):
     assert args.n % len(H[0]) == 0
     M = construct_M(args.n, len(H[0]), H, args.M_size, seed=args.seed)
     test_set = construct_test_set(M, seed=args.seed)
-    print(f"test set size: {len(test_set)}")
+    print(f"test set size: {len(test_set)}",flush=True)
+
 
     model = TransformerModel(ntoken=2**args.k+2, d_model=64, d_hid=64, nhead=8, nlayers=3, 
                              seq_len=args.n//args.k, dropout=args.dropout).to(device)
@@ -494,6 +507,7 @@ def main(args):
 
     corr_nums = []
     mode_nums = []
+    cum_reward=[]
     if args.objective == "softdqn":
         # Renormalize entropy for Munchausen DQN
         args.entropy_coeff *= 1/(1 - args.m_alpha)
@@ -530,21 +544,42 @@ def main(args):
                     break
         
         if it > 0 and it % args.print_every == 0:
-            print(f"{it}, loss: {loss}, modes: {sum(modes)}, avg reward: {avg_reward / args.print_every}, log_Z: {log_Z.sum().cpu().item()}")
+            cum_reward.append(avg_reward / args.print_every)
+            print(f"method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed}), {it}, loss: {loss}, modes: {sum(modes)}, avg current reward: {avg_reward / args.print_every}, avg all reward: {np.mean(cum_reward)}, log_Z: {log_Z.sum().cpu().item()}",flush=True)
             avg_reward = 0.0
 
         if it > 0 and it % 2000 == 0:
             if args.print_modes:
-                print("found modes:")
+                print("found modes:",flush=True)
                 for m in range(len(M)):
                     if modes[m]:
-                        print(M[m])
+                        print(M[m],flush=True)
             mode_nums.append(sum(modes))
 
             sp_corr = compute_correlation(model, M, test_set, args, rounds=args.corr_num_rounds)
-            print(f"test set reward correlation: {sp_corr}")
+            print(f"test set reward correlation: {sp_corr}",flush=True)
+            wandb.log({
+                "modes": sum(modes),
+                "spearman_correlation": sp_corr.statistic,
+                "avg_all_reward": np.mean(cum_reward),
+                "avg_current_reward": cum_reward[-1],
+                "loss":loss,
+                "log_Z": log_Z.sum().cpu().item()
+            })
             corr_nums.append(sp_corr.statistic)
+    print('fininsh training',flush=True)
+    wandb.finish()
+    print('wandb is finished but not synced, remember to sync manually',flush=True)
+    # subprocess.run(["wandb", "sync", "wandb/"])
+    # print('wandb synced')
 
 if __name__ == '__main__':
+    os.environ["WANDB_MODE"] = "offline"
+    print('wandb is offline',flush=True)
     args = parser.parse_args()
+    print(f'executing method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed})',flush=True)
     main(args)
+    # k in {1, 2, 4, 6, 8, 10}
+    # TODO: check code
+    # TODO: change the log directory 
+    # remarks： gfn is trained online

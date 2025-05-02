@@ -679,6 +679,7 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
         corr = np.corrcoef(true_log_r, pred_log_r)[0][1]
         print(f"final_correlation: {corr}")
         num_modes, num_above = compute_num_of_modes(dataset.sampled_mols, reward_thresh=7.0)
+        # TODO: add the calculation of top100 avg reward and avg reward
         print(f'num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}')
         print('End training!')
 
