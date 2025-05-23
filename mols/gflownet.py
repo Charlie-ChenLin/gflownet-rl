@@ -42,11 +42,11 @@ parser.add_argument("--opt_epsilon", default=1e-8, type=float)
 parser.add_argument("--nemb", default=256, help="#hidden", type=int)
 parser.add_argument("--min_blocks", default=2, type=int)
 parser.add_argument("--max_blocks", default=8, type=int)
-parser.add_argument("--num_iterations", default=50000, type=int) # change it to 50000
+parser.add_argument("--num_iterations", default=50000, type=int)
 parser.add_argument("--save_every", default=2000, type=int)
 parser.add_argument("--num_conv_steps", default=10, type=int)
 parser.add_argument("--log_reg_c", default=2.5e-5, type=float)
-parser.add_argument("--reward_exp", default=4, type=float) # change it to 4, original 10
+parser.add_argument("--reward_exp", default=4, type=float)
 parser.add_argument("--reward_norm", default=8, type=float)
 parser.add_argument("--sample_prob", default=1, type=float)
 parser.add_argument("--R_min", default=0.1, type=float)
