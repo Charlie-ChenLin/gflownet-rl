@@ -19,7 +19,6 @@ from tensordict import TensorDict
 import sys
 import io
 
-# 替换 stdout 为启用行缓冲的版本（自动 flush 每一行）
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
@@ -48,7 +47,7 @@ parser.add_argument("--leaf_coeff", default=5.0, type=float)
 parser.add_argument("--update_target_every", default=5, type=int)
 parser.add_argument("--corr_num_rounds", default=10, type=int)
 
-# biased GFlowNet
+# Alpha GFlowNets
 parser.add_argument("--alpha",default=0.5, type=float)
 
 # SoftDQN params
@@ -467,7 +466,7 @@ def compute_correlation(model, M, test_set, args, rounds=10, batch_size=180):
 
 
 def main(args):
-    wandb.init(project='Length Biased GFlowNets, GFN-RL-codebase, Bit Sequence Generation, New', name=f'method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed})')
+    wandb.init(project='Alpha GFlowNets, GFN-RL-codebase, Bit Sequence Generation', name=f'method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed})')
 
     torch.manual_seed(args.seed)
     device = args.device
@@ -569,17 +568,12 @@ def main(args):
             corr_nums.append(sp_corr.statistic)
     print('fininsh training',flush=True)
     wandb.finish()
-    print('wandb is finished but not synced, remember to sync manually',flush=True)
-    # subprocess.run(["wandb", "sync", "wandb/"])
-    # print('wandb synced')
+    # print('wandb is finished but not synced, remember to sync manually',flush=True)
+
 
 if __name__ == '__main__':
-    os.environ["WANDB_MODE"] = "offline"
-    print('wandb is offline',flush=True)
+    # os.environ["WANDB_MODE"] = "offline"
+    # print('wandb is offline',flush=True)
     args = parser.parse_args()
     print(f'executing method({args.objective})_alpha({args.alpha})_k({args.k})_seed({args.seed})',flush=True)
     main(args)
-    # k in {1, 2, 4, 6, 8, 10}
-    # TODO: check code
-    # TODO: change the log directory 
-    # remarks： gfn is trained online

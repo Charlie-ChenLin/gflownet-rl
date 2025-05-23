@@ -71,6 +71,7 @@ parser.add_argument("--balanced_loss", default=True)
 parser.add_argument("--early_stop_reg", default=0.1, type=float)
 parser.add_argument("--initial_log_Z", default=30, type=float)
 parser.add_argument("--objective", default='fm', type=str)
+parser.add_argument("--entropy_coeff",  default=1.0,  help="Temperature／entropy coefficient for policy sampling", type=float)
 # If True this basically implements Buesing et al's TreeSample Q/SoftQLearning, samples uniformly
 # from it though, no MCTS involved
 parser.add_argument("--ignore_parents", default=False)
@@ -80,7 +81,6 @@ parser.add_argument("--subtb_lambda", default=0.99, type=float)
 # alpha GFlowNets
 parser.add_argument("--train_seed",default=0, type=int)
 parser.add_argument("--alpha",default=0.5, type=float)
-parser.add_argument("--entropy_coeff",  default=1.0,  help="Temperature／entropy coefficient for policy sampling", type=float)
 
 @torch.jit.script
 def detailed_balance_loss(P_F, P_B, F, R, traj_lengths,alpha):
@@ -679,14 +679,14 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
 
         if not i % 100:
             last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
-            print(f"method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff}) epoch {i}, last losses {last_losses}, time elapsed {time.time() - time_last_check}",flush=True)
+            print(f"method({args.objective})_alpha({args.alpha})_seed({args.train_seed}) epoch {i}, last losses {last_losses}, time elapsed {time.time() - time_last_check}",flush=True)
             time_last_check = time.time()
             last_losses = []
 
             if not i % args.save_every and do_save:
                 true_log_r, pred_log_r = save_stuff(i)
                 num_modes, num_above = compute_num_of_modes(dataset.sampled_mols, reward_thresh=7.0)
-                print(f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff}) test at epoch {i}, correlation: {np.corrcoef(true_log_r, pred_log_r)[0][1]}, num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}',flush=True)
+                print(f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed}) test at epoch {i}, correlation: {np.corrcoef(true_log_r, pred_log_r)[0][1]}, num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}',flush=True)
                 wandb.log({
                     "correlation": np.corrcoef(true_log_r, pred_log_r)[0][1],
                     'num modes R > 7.0': num_modes,
@@ -913,5 +913,5 @@ if __name__ == '__main__':
     args = parser.parse_args()
     # os.environ["WANDB_MODE"] = "offline"
     # print('wandb is offline',flush=True)
-    wandb.init(project='Alpha GFlowNets, GFN-RL-codebase, Molecule Generation', name=f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff})')
+    wandb.init(project='Alpha GFlowNets, GFN-RL-codebase, Molecule Generation', name=f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed})')
     main(args)
