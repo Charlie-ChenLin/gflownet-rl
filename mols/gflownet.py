@@ -676,8 +676,6 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
         if tau > 0:
             for _a,b in zip(model.parameters(), target_model.parameters()):
                 b.data.mul_(1-tau).add_(tau*_a)
-        if i%10:
-            print
 
         if not i % 100:
             last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
