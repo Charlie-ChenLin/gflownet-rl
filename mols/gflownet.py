@@ -19,8 +19,15 @@ import model_atom, model_block, model_fingerprint
 from mol_mdp_ext import MolMDPExtended, BlockMoleculeDataExtended
 from utils.chem import compute_num_of_modes
 
+import sys
+import io
+
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
 
 warnings.filterwarnings('ignore')
+
+import wandb
 
 tmp_dir = "./tmp"
 os.makedirs(tmp_dir, exist_ok=True)
@@ -35,11 +42,11 @@ parser.add_argument("--opt_epsilon", default=1e-8, type=float)
 parser.add_argument("--nemb", default=256, help="#hidden", type=int)
 parser.add_argument("--min_blocks", default=2, type=int)
 parser.add_argument("--max_blocks", default=8, type=int)
-parser.add_argument("--num_iterations", default=250000, type=int)
+parser.add_argument("--num_iterations", default=50000, type=int) # change it to 50000
 parser.add_argument("--save_every", default=2000, type=int)
 parser.add_argument("--num_conv_steps", default=10, type=int)
 parser.add_argument("--log_reg_c", default=2.5e-5, type=float)
-parser.add_argument("--reward_exp", default=10, type=float)
+parser.add_argument("--reward_exp", default=4, type=float) # change it to 4, original 10
 parser.add_argument("--reward_norm", default=8, type=float)
 parser.add_argument("--sample_prob", default=1, type=float)
 parser.add_argument("--R_min", default=0.1, type=float)
@@ -49,7 +56,7 @@ parser.add_argument("--clip_loss", default=0, type=float)
 parser.add_argument("--replay_mode", default='online', type=str)
 parser.add_argument("--bootstrap_tau", default=0, type=float)
 parser.add_argument("--weight_decay", default=0, type=float)
-parser.add_argument("--random_action_prob", default=0.05, type=float)
+parser.add_argument("--random_action_prob", default=0.05, type=float) 
 parser.add_argument("--array", default='')
 parser.add_argument("--repr_type", default='block_graph')
 parser.add_argument("--model_version", default='v4')
@@ -70,9 +77,14 @@ parser.add_argument("--ignore_parents", default=False)
 
 parser.add_argument("--subtb_lambda", default=0.99, type=float)
 
+# alpha GFlowNets
+parser.add_argument("--train_seed",default=0, type=int)
+parser.add_argument("--alpha",default=0.5, type=float)
+parser.add_argument("--entropy_coeff",  default=1.0,  help="Temperature／entropy coefficient for policy sampling", type=float)
 
 @torch.jit.script
-def detailed_balance_loss(P_F, P_B, F, R, traj_lengths):
+def detailed_balance_loss(P_F, P_B, F, R, traj_lengths,alpha):
+    bias=torch.log(alpha/(1-alpha))
     cumul_lens = torch.cumsum(torch.cat([torch.zeros(1, device=traj_lengths.device), traj_lengths]), 0).long()
     total_loss = torch.zeros(1, device=traj_lengths.device)
     for ep in range(traj_lengths.shape[0]):
@@ -82,22 +94,24 @@ def detailed_balance_loss(P_F, P_B, F, R, traj_lengths):
             # This flag is False if the endpoint flow of this trajectory is R == F(s_T)
             flag = float(i + 1 < T)
             acc = (F[offset + i] - F[offset + min(i + 1, T - 1)] * flag - R[ep] * (1 - flag)
-                   + P_F[offset + i] - P_B[offset + i])
+                   + P_F[offset + i] - P_B[offset + i]+bias)
             total_loss += acc.pow(2)
     return total_loss
 
 @torch.jit.script
-def trajectory_balance_loss(P_F, P_B, F, R, traj_lengths):
+def trajectory_balance_loss(P_F, P_B, logZ, R, traj_lengths,alpha):
+    bias=torch.log(alpha/(1-alpha))
     cumul_lens = torch.cumsum(torch.cat([torch.zeros(1, device=traj_lengths.device), traj_lengths]), 0).long()
     total_loss = torch.zeros(1, device=traj_lengths.device)
     for ep in range(traj_lengths.shape[0]):
         offset = cumul_lens[ep]
         T = int(traj_lengths[ep])
-        total_loss += (F[offset] - R[ep] + P_F[offset:offset+T].sum() - P_B[offset:offset+T].sum()).pow(2)
+        total_loss += (logZ - R[ep] + P_F[offset:offset+T].sum() - P_B[offset:offset+T].sum()+T*bias).pow(2)
     return total_loss / float(traj_lengths.shape[0])
 
 @torch.jit.script
-def tb_lambda_loss(P_F, P_B, F, R, traj_lengths, Lambda):
+def tb_lambda_loss(P_F, P_B, F, R, traj_lengths, Lambda,alpha):
+    bias=torch.log(alpha/(1-alpha))
     cumul_lens = torch.cumsum(torch.cat([torch.zeros(1, device=traj_lengths.device), traj_lengths]), 0).long()
     total_loss = torch.zeros(1, device=traj_lengths.device)
     total_Lambda = torch.zeros(1, device=traj_lengths.device)
@@ -111,7 +125,7 @@ def tb_lambda_loss(P_F, P_B, F, R, traj_lengths, Lambda):
                 acc = F[offset + i] - F[offset + min(j + 1, T - 1)] * flag - R[ep] * (1 - flag)
                 for k in range(i, j + 1):
                     acc += P_F[offset + k] - P_B[offset + k]
-                total_loss += acc.pow(2) * Lambda ** (j - i + 1)
+                total_loss += (acc+(j-i+1)*bias).pow(2) * Lambda ** (j - i + 1)
                 total_Lambda += Lambda ** (j - i + 1)
     return total_loss / total_Lambda
 
@@ -119,7 +133,8 @@ class Dataset:
 
     def __init__(self, args, bpath, device, floatX=torch.double):
         self.test_split_rng = np.random.RandomState(142857)
-        self.train_rng = np.random.RandomState(int(time.time()))
+        # self.train_rng = np.random.RandomState(int(time.time()))
+        self.train_rng = np.random.RandomState(args.train_seed)
         self.train_mols = []
         self.test_mols = []
         self.train_mols_map = {}
@@ -485,7 +500,8 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
     dataset.set_sampling_model(model, proxy, sample_prob=args.sample_prob)
 
     def save_stuff(iter):
-        corr_logp = compute_correlation(model, dataset.mdp, entropy_coeff=args.entropy_coeff)
+        # corr_logp = compute_correlation(model, dataset.mdp, entropy_coeff=args.entropy_coeff)
+        corr_logp = compute_correlation(model, dataset.mdp, args)
         pickle.dump(corr_logp, gzip.open(f'{exp_dir}/{iter}_model_logp_pred.pkl.gz', 'wb'))
 
         pickle.dump([i.data.cpu().numpy() for i in model.parameters()],
@@ -631,14 +647,16 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
             tzeros = torch.zeros(idc[-1]+1, device=device, dtype=args.floatX)
             traj_r = tzeros.index_add(0, idc, r)
             if args.objective == 'tb':
-                uniform_log_PB = tzeros.index_add(0, idc, torch.log(1/n))
-                traj_logits = tzeros.index_add(0, idc, logits)
-                losses = ((model.logZ + traj_logits) - (torch.log(traj_r) + uniform_log_PB)).pow(2)
-                loss = losses.mean()
-            elif args.objective == 'detbal':
-                loss = detailed_balance_loss(logits, torch.log(1/n), mol_out_s[:, 1], torch.log(traj_r), lens)
+                # uniform_log_PB = tzeros.index_add(0, idc, torch.log(1/n))
+                # traj_logits = tzeros.index_add(0, idc, logits)
+                # losses = ((model.logZ + traj_logits) - (torch.log(traj_r) + uniform_log_PB)).pow(2)
+                # loss = losses.mean()
+                loss=trajectory_balance_loss(logits,torch.log(torch.tensor(1/n,device=device)),model.logZ,torch.log(traj_r),lens,torch.tensor(args.alpha,device=traj_r.device))
+            elif args.objective == 'db':
+                loss = detailed_balance_loss(logits, torch.log(torch.tensor(1/n,device=device)), mol_out_s[:, 1], torch.log(traj_r), lens,torch.tensor(args.alpha,device=traj_r.device))
             elif args.objective == 'subtb':
-                loss = tb_lambda_loss(logits, torch.log(1/n), mol_out_s[:, 1], torch.log(traj_r), lens, Lambda)
+                loss = tb_lambda_loss(logits, torch.log(torch.tensor(1/n,device=device)), mol_out_s[:, 1], torch.log(traj_r), lens, Lambda,torch.tensor(args.alpha,device=traj_r.device))
+
             opt.zero_grad()
             loss.backward()
 
@@ -658,29 +676,37 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
         if tau > 0:
             for _a,b in zip(model.parameters(), target_model.parameters()):
                 b.data.mul_(1-tau).add_(tau*_a)
-
+        if i%10:
+            print
 
         if not i % 100:
             last_losses = [np.round(np.mean(i), 3) for i in zip(*last_losses)]
-            print(i, last_losses)
-            print('time:', time.time() - time_last_check)
+            print(f"method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff}) epoch {i}, last losses {last_losses}, time elapsed {time.time() - time_last_check}",flush=True)
             time_last_check = time.time()
             last_losses = []
 
             if not i % args.save_every and do_save:
                 true_log_r, pred_log_r = save_stuff(i)
-                print(f"correlation: {np.corrcoef(true_log_r, pred_log_r)[0][1]}")
                 num_modes, num_above = compute_num_of_modes(dataset.sampled_mols, reward_thresh=7.0)
-                print(f'num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}')
+                print(f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff}) test at epoch {i}, correlation: {np.corrcoef(true_log_r, pred_log_r)[0][1]}, num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}',flush=True)
+                wandb.log({
+                    "correlation": np.corrcoef(true_log_r, pred_log_r)[0][1],
+                    'num modes R > 7.0': num_modes,
+                    'num candidates R > 7.0':num_above,
+                })
 
     stop_everything()
     if do_save:
         true_log_r, pred_log_r = save_stuff(i)
         corr = np.corrcoef(true_log_r, pred_log_r)[0][1]
-        print(f"final_correlation: {corr}")
+        print(f"final_correlation: {corr}",flush=True)
         num_modes, num_above = compute_num_of_modes(dataset.sampled_mols, reward_thresh=7.0)
-        # TODO: add the calculation of top100 avg reward and avg reward
-        print(f'num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}')
+        print(f'num modes R > 7.0: {num_modes}, num candidates R > 7.0: {num_above}',flush=True)
+        wandb.log({
+                    "final correlation": np.corrcoef(true_log_r, pred_log_r)[0][1],
+                    'final num modes R > 7.0': num_modes,
+                    'final num candidates R > 7.0':num_above,
+                })
         print('End training!')
 
     return model
@@ -688,6 +714,9 @@ def train_model_with_proxy(args, model, proxy, dataset, num_steps=None, do_save=
 
 def main(args):
     bpath = "data/blocks_PDB_105.json"
+    torch.manual_seed(args.train_seed)
+    np.random.seed(args.train_seed)
+
     device = torch.device('cuda')
     print(args)
 
@@ -705,13 +734,14 @@ def main(args):
 
     mdp = dataset.mdp
 
-    model = make_model(args, mdp, out_per_mol=1 + (1 if args.objective in ['subtb', 'subtbWS', 'detbal'] else 0))
+    model = make_model(args, mdp, out_per_mol=1 + (1 if args.objective in ['subtb', 'subtbWS', 'db'] else 0))
     model.to(args.floatX)
     model.to(device)
 
     proxy = Proxy(args, bpath, device)
 
     train_model_with_proxy(args, model, proxy, dataset, do_save=True)
+    wandb.finish()
     print('Done.')
 
 
@@ -883,4 +913,7 @@ good_config = {
 
 if __name__ == '__main__':
     args = parser.parse_args()
+    # os.environ["WANDB_MODE"] = "offline"
+    # print('wandb is offline',flush=True)
+    wandb.init(project='Alpha GFlowNets, GFN-RL-codebase, Molecule Generation', name=f'method({args.objective})_alpha({args.alpha})_seed({args.train_seed})_ec({args.entropy_coeff})')
     main(args)

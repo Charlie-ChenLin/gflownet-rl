@@ -161,4 +161,25 @@ cython_debug/
 
 # log files
 log/*
+wandb_missing_runs/*
+wandb_sync.slurm
+
 bitseq/wandb/*
+bitseq/wandb_missing_runs/*
+bitseq/missing_runs.txt
+bitseq/bitseq.slurm
+bitseq/bitseq_new.slurm
+bitseq/run_missing.slurm
+
+hypergrid/*
+
+mols/__pycache__/*
+mols/results/*
+mols/tmp/*
+mols/wandb/*
+mols/wandb_missing_runs/*
+mols/gflownet_led.py
+mols/mols_missing.slurm
+mols/mols.slurm
+
+
